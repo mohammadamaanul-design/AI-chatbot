@@ -1,27 +1,21 @@
 """
-Simple functional AI Chatbot with API
-File: ai_chatbot_api_flask.py
+Simple functional AI Chatbot with Gemini API
+File: ai_chatbot_api_flask_gemini.py
 
 Features:
 - Flask backend with a /api/chat POST endpoint
-- Serves a minimal single-file frontend at / for manual testing
-- Uses the official OpenAI Python package (import openai)
-- Keeps a short conversation history per-session (in-memory) for context
+- Serves a minimal single-file frontend at /
+- Uses Google Generative AI (Gemini)
+- Keeps short conversation history per-session (in-memory) for context
 
 Requirements:
 - Python 3.10+
-- pip install flask flask-cors openai
-- Set environment variable OPENAI_API_KEY before running
-
-Notes:
-- This is a minimal example for learning and prototyping. For production:
-  * Use proper authentication on the API endpoint
-  * Persist conversation history in a database
-  * Add rate-limiting, input sanitization, logging, and monitoring
+- pip install flask flask-cors google-generativeai
+- Set environment variable GEMINI_API_KEY before running
 
 Run:
-    export OPENAI_API_KEY="sk-..."
-    python ai_chatbot_api_flask.py
+    export GEMINI_API_KEY="AIzaSyAQZuaUCNsgo3FDhOLzQR-z8bddbDpzHYs"
+    python ai_chatbot_api_flask_gemini.py
 
 Then open http://127.0.0.1:5000
 """
@@ -29,37 +23,32 @@ Then open http://127.0.0.1:5000
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import os
-import openai
 import uuid
+import google.generativeai as genai
 
 app = Flask(__name__)
 CORS(app)
 
-# Initialize OpenAI client (reads key from env variable)
-api_key = os.getenv("OPENAI_API_KEY")
+# --- Gemini Setup ---
+api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
-    raise EnvironmentError(
-        "Set OPENAI_API_KEY environment variable before running."
-    )
-openai.api_key = api_key
+    raise EnvironmentError("Set GEMINI_API_KEY environment variable before running.")
+genai.configure(api_key=api_key)
 
-# In-memory store for conversation history (warning: not persistent)
-# Structure: conversations[session_id] = [ {role: 'user'|'assistant'|'system', content: '...'}, ... ]
+# --- Conversation Store (In-Memory) ---
 conversations = {}
-
 SYSTEM_PROMPT = (
-    "You are a helpful, concise assistant. Keep answers short unless user asks for details."
+    "You are a helpful, concise AI assistant. Keep answers short unless the user asks for more details."
 )
+
 
 @app.route("/api/chat", methods=["POST"])
 def chat_api():
     """POST JSON body:
     {
       "session_id": "optional-session-id",
-      "message": "user message string",
-      "max_tokens": 400
+      "message": "user message string"
     }
-
     Response:
     {
       "session_id": "returned-or-new-session-id",
@@ -67,66 +56,57 @@ def chat_api():
     }
     """
     data = request.get_json(force=True)
-    user_message = data.get("message", "")
+    user_message = data.get("message", "").strip()
     if not user_message:
         return jsonify({"error": "`message` is required"}), 400
 
+    # Session management
     session_id = data.get("session_id") or str(uuid.uuid4())
-    # create history for new session
     if session_id not in conversations:
-        conversations[session_id] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        conversations[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # append user message
+    # Add user message
     conversations[session_id].append({"role": "user", "content": user_message})
 
-    # Call OpenAI Chat Completions API
+    # Create prompt with short history
+    chat_history = "\n".join(
+        [
+            f"{m['role'].capitalize()}: {m['content']}"
+            for m in conversations[session_id]
+            if m["role"] != "system"
+        ]
+    )
+    prompt = f"{SYSTEM_PROMPT}\n\n{chat_history}\nAssistant:"
+
     try:
-        # Use the standard openai.ChatCompletion.create pattern
-        resp = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # change to gpt-4 or other model if available
-            messages=conversations[session_id],
-            max_tokens=data.get("max_tokens", 300),
-            temperature=data.get("temperature", 0.7),
-        )
-
-        # Extract assistant message text in a robust way
-        assistant_message = None
-        if isinstance(resp, dict):
-            assistant_message = resp.get("choices", [{}])[0].get("message", {}).get("content")
-        else:
-            # some OpenAI client versions return objects with attributes
-            try:
-                assistant_message = resp.choices[0].message.content
-            except Exception:
-                assistant_message = str(resp)
-
-        if not assistant_message:
-            assistant_message = "(no reply from model)"
-
-        # Append assistant reply to history
-        conversations[session_id].append({"role": "assistant", "content": assistant_message})
-
-        # (Optional) Trim history to last N messages to control token usage
-        MAX_HISTORY_MESSAGES = 20
-        if len(conversations[session_id]) > MAX_HISTORY_MESSAGES:
-            # keep system prompt + last (MAX_HISTORY_MESSAGES-1) messages
-            conversations[session_id] = [conversations[session_id][0]] + conversations[session_id][- (MAX_HISTORY_MESSAGES - 1) :]
-
-        return jsonify({"session_id": session_id, "reply": assistant_message})
-
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        assistant_message = response.text or "(no reply from model)"
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+    # Save assistant response
+    conversations[session_id].append(
+        {"role": "assistant", "content": assistant_message}
+    )
 
-# Minimal web UI for quick testing
+    # Trim history to prevent memory bloat
+    MAX_HISTORY = 20
+    if len(conversations[session_id]) > MAX_HISTORY:
+        conversations[session_id] = [conversations[session_id][0]] + conversations[
+            session_id
+        ][-(MAX_HISTORY - 1) :]
+
+    return jsonify({"session_id": session_id, "reply": assistant_message})
+
+
+# --- Minimal Frontend for Testing ---
 INDEX_HTML = """
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Simple AI Chatbot</title>
+    <title>Simple AI Chatbot (Gemini)</title>
     <style>
       body { font-family: Arial, sans-serif; max-width:800px; margin:40px auto; }
       #chat { border:1px solid #ddd; padding:16px; height:400px; overflow:auto; }
@@ -138,7 +118,7 @@ INDEX_HTML = """
     </style>
   </head>
   <body>
-    <h2>Simple AI Chatbot (local)</h2>
+    <h2>Simple AI Chatbot (Gemini API)</h2>
     <div id="chat"></div>
 
     <div id="controls">
@@ -196,32 +176,6 @@ def index():
     return render_template_string(INDEX_HTML)
 
 
-# --- Basic tests ---
-# The following tests can be run by setting the environment variable TEST=1 and executing the file.
-# They do not call OpenAI; they only verify the Flask routes behave for basic input validation.
-
-def _run_basic_tests():
-    print("Running basic sanity tests...")
-    with app.test_client() as c:
-        # 1) index page
-        r = c.get('/')
-        assert r.status_code == 200, 'index page should return 200'
-        print(' - index OK')
-
-        # 2) missing message -> 400
-        r = c.post('/api/chat', json={})
-        assert r.status_code == 400, 'POST /api/chat without message should return 400'
-        print(' - /api/chat missing message validation OK')
-
-        # 3) session creation + message validation (we can't test model call without mocking)
-        r = c.post('/api/chat', json={'message': 'hi'})
-        # If API key is invalid or model call fails, we should receive a 500 or a JSON error; just print outcome
-        print(' - /api/chat with message returned', r.status_code)
-        print('Basic tests completed.')
-
-
+# --- Run App ---
 if __name__ == "__main__":
-    if os.getenv('TEST') == '1':
-        _run_basic_tests()
-    else:
-        app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5000)
